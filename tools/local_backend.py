@@ -51,6 +51,11 @@ def packs() -> dict[str, dict]:
             if p.name != "index.json"}
 
 
+def write_model_paths(comfy: Path, models: Path) -> None:
+    lines = ["freefield:", f"  base_path: {models.as_posix()}"] + [f"  {d}: {d}" for d in MODEL_DIRS]
+    (comfy / "extra_model_paths.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def setup(comfy: Path, models: Path) -> None:
     try:
         import torch  # noqa: F401
@@ -69,8 +74,7 @@ def setup(comfy: Path, models: Path) -> None:
         if (dst / "requirements.txt").exists():
             pip("-r", dst / "requirements.txt")
     pip(COMFY_API_PROXY, "aiohttp", "huggingface_hub[hf-xet]")
-    lines = ["freefield:", f"  base_path: {models.as_posix()}"] + [f"  {d}: {d}" for d in MODEL_DIRS]
-    (comfy / "extra_model_paths.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_model_paths(comfy, models)
     print(f"\nComfyUI {COMFYUI_COMMIT[:7]} with {len(pinned)} custom nodes in {comfy}; models in {models}")
     print(f"next: python tools/local_backend.py download {comfy} <pack> (packs: {', '.join(packs())})")
 
@@ -153,7 +157,7 @@ def find_proxy() -> str | None:
     return str(here) if here.exists() else shutil.which("comfy-api-proxy")
 
 
-def serve(comfy: Path, comfy_args: list[str], port: int) -> None:
+def serve(comfy: Path, models: Path, comfy_args: list[str], port: int) -> None:
     token = env_token()
     proxy = find_proxy()
 
@@ -162,6 +166,7 @@ def serve(comfy: Path, comfy_args: list[str], port: int) -> None:
     signal.signal(signal.SIGTERM, stop)
     if not proxy:
         sys.exit("comfy-api-proxy is not installed here: run setup first, in this same environment")
+    write_model_paths(comfy, models)
     procs = []
     try:
         cmd = [sys.executable, "main.py", "--listen", "127.0.0.1", "--port", "8188", "--disable-auto-launch",
@@ -179,6 +184,9 @@ def serve(comfy: Path, comfy_args: list[str], port: int) -> None:
               flush=True)
         while all(p.poll() is None for p in procs):
             time.sleep(1)
+        if procs[-1].poll() == 0:
+            print("gateway stopped cleanly (idle shutdown); stopping ComfyUI and proxy", flush=True)
+            return
         sys.exit("a backend process exited; the others are stopped")
     except KeyboardInterrupt:
         pass
@@ -216,7 +224,7 @@ def main() -> None:
     elif a.cmd == "download":
         download(models, a.packs, a.dry_run)
     else:
-        serve(comfy, [x for x in a.comfy_args if x != "--"], a.port)
+        serve(comfy, models, [x for x in a.comfy_args if x != "--"], a.port)
 
 
 if __name__ == "__main__":

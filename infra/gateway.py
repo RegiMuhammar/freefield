@@ -22,7 +22,10 @@ import asyncio
 import hmac
 import logging
 import os
+import signal
 import time
+from collections.abc import Callable
+from pathlib import Path
 
 from aiohttp import ClientSession, ClientTimeout, web
 
@@ -30,6 +33,9 @@ COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188")
 PROXY_URL = os.environ.get("PROXY_URL", "http://127.0.0.1:8189")
 TOKEN = os.environ.get("FREEFIELD_TOKEN", "")
 ALLOW_OPEN = os.environ.get("FREEFIELD_ALLOW_OPEN") == "1"
+IDLE_UNLOAD_SEC = float(os.environ.get("FREEFIELD_IDLE_UNLOAD_SEC") or 0)
+IDLE_SHUTDOWN_SEC = float(os.environ.get("FREEFIELD_IDLE_SHUTDOWN_SEC") or 0)
+IDLE_MARKER = os.environ.get("FREEFIELD_IDLE_MARKER", "")
 HOP_HEADERS = {"host", "authorization", "content-length", "transfer-encoding", "connection", "keep-alive"}
 
 log = logging.getLogger("gateway")
@@ -44,8 +50,13 @@ class Pantry:
         self.app: str | None = None
         self.lock = asyncio.Lock()
         self.frees = 0
+        self.last_activity = time.time()
+
+    def touch(self) -> None:
+        self.last_activity = time.time()
 
     async def prepare(self, app: str, models: str) -> dict:
+        self.touch()
         async with self.lock:
             freed = False
             previous = self.app
@@ -56,6 +67,21 @@ class Pantry:
                 self.frees += 1
             self.models, self.app = models, app
             return {"freed": freed, "previous": previous, "current": app}
+
+    async def unload(self) -> bool:
+        """Unload models and free VRAM without changing the active app until the next prepare."""
+        async with self.lock:
+            if self.models is None:
+                return False
+            try:
+                async with self.session.post(f"{COMFYUI_URL}/free", json={"unload_models": True, "free_memory": True}) as r:
+                    r.raise_for_status()
+            except Exception as e:
+                log.warning("idle unload failed: %s", e)
+                return False
+            self.models, self.app = None, None
+            self.frees += 1
+            return True
 
 
 def authorized(request: web.Request) -> bool:
@@ -72,7 +98,9 @@ async def auth_mw(request: web.Request, handler):
     return web.json_response({"error": "missing or wrong token"}, status=401)
 
 
-async def health(_: web.Request) -> web.Response:
+async def health(request: web.Request) -> web.Response:
+    if request.query.get("wake") == "1":
+        request.app["pantry"].touch()
     return web.json_response({"ok": True})
 
 
@@ -93,7 +121,16 @@ async def status(request: web.Request) -> web.Response:
             stats = await r.json()
     except Exception as e:  # ComfyUI may still be starting
         stats = {"error": str(e)}
-    return web.json_response({"app": pantry.app, "models": pantry.models, "frees": pantry.frees, "comfyui": stats})
+    idle_sec = round(max(0.0, time.time() - pantry.last_activity), 1)
+    shutdown_sec = request.app["idle_shutdown_sec"]
+    return web.json_response({
+        "app": pantry.app,
+        "models": pantry.models,
+        "frees": pantry.frees,
+        "idle_sec": idle_sec,
+        "idle_shutdown_sec": shutdown_sec if shutdown_sec > 0 else None,
+        "comfyui": stats,
+    })
 
 
 LOCAL_HOSTS = ("127.0.0.1", "localhost", "0.0.0.0", "[::1]")
@@ -118,11 +155,14 @@ def relink(body: bytes, request: web.Request) -> bytes:
 
 
 async def forward(request: web.Request) -> web.StreamResponse:
+    pantry: Pantry = request.app["pantry"]
+    pantry.touch()
     session: ClientSession = request.app["session"]
     headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_HEADERS}
 
     async def body():
         async for chunk in request.content.iter_chunked(1 << 16):
+            pantry.touch()
             yield chunk
 
     data = body() if request.can_read_body else None
@@ -131,6 +171,7 @@ async def forward(request: web.Request) -> web.StreamResponse:
         passthrough = {k: v for k, v in upstream.headers.items() if k.lower() not in HOP_HEADERS | {"content-encoding"}}
         if upstream.content_type == "application/json":   # job and asset answers carry links: fix them up whole
             raw = relink(await upstream.read(), request)
+            pantry.touch()
             passthrough.pop("Content-Length", None)
             return web.Response(status=upstream.status, body=raw, headers=passthrough)
         resp = web.StreamResponse(status=upstream.status)
@@ -138,24 +179,90 @@ async def forward(request: web.Request) -> web.StreamResponse:
             resp.headers[k] = v
         await resp.prepare(request)
         async for chunk in upstream.content.iter_any():   # streams SSE events and big files as they come
+            pantry.touch()
             await resp.write(chunk)
         await resp.write_eof()
         return resp
 
 
+async def comfy_busy(session: ClientSession) -> bool:
+    """True while ComfyUI has any job running or queued."""
+    try:
+        async with session.get(f"{COMFYUI_URL}/queue", timeout=ClientTimeout(total=5)) as r:
+            if r.status != 200:
+                return False
+            q = await r.json()
+            return bool(q.get("queue_running") or q.get("queue_pending"))
+    except Exception:
+        return False
+
+
+def _default_shutdown() -> None:
+    if IDLE_MARKER:
+        try:
+            Path(IDLE_MARKER).write_text(str(int(time.time())), encoding="utf-8")
+        except Exception as e:
+            log.warning("could not write IDLE_MARKER %s: %s", IDLE_MARKER, e)
+    try:
+        from google.colab import runtime  # type: ignore
+        log.warning("calling google.colab.runtime.unassign() to release Colab GPU...")
+        runtime.unassign()
+    except Exception:
+        pass
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+async def idle_watchdog(app: web.Application) -> None:
+    pantry: Pantry = app["pantry"]
+    unload_sec: float = app["idle_unload_sec"]
+    shutdown_sec: float = app["idle_shutdown_sec"]
+    positive = [x for x in (unload_sec, shutdown_sec) if x > 0]
+    interval = max(0.05, min(5.0, min(positive) / 4)) if positive else 5.0
+    while True:
+        await asyncio.sleep(interval)
+        if await comfy_busy(pantry.session):
+            pantry.touch()
+            continue
+        idle = time.time() - pantry.last_activity
+        if unload_sec > 0 and idle >= unload_sec and pantry.models is not None:
+            if await pantry.unload():
+                log.info("idle %.1fs >= %.1fs: unloaded models from VRAM", idle, unload_sec)
+        if shutdown_sec > 0 and idle >= shutdown_sec:
+            log.warning("idle %.1fs >= %.1fs: triggering auto-shutdown", idle, shutdown_sec)
+            app["on_idle_shutdown"]()
+            return
+
+
 async def on_startup(app: web.Application) -> None:
     app["session"] = ClientSession(timeout=ClientTimeout(total=None, sock_connect=30), auto_decompress=False)
     app["pantry"] = Pantry(app["session"])
+    if app["idle_unload_sec"] > 0 or app["idle_shutdown_sec"] > 0:
+        app["watchdog_task"] = asyncio.create_task(idle_watchdog(app))
 
 
 async def on_cleanup(app: web.Application) -> None:
+    task: asyncio.Task | None = app.get("watchdog_task")
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     await app["session"].close()
 
 
-def make_app() -> web.Application:
+def make_app(
+    *,
+    idle_unload_sec: float | None = None,
+    idle_shutdown_sec: float | None = None,
+    on_idle_shutdown: Callable[[], None] | None = None,
+) -> web.Application:
     if not TOKEN and not ALLOW_OPEN:
         raise SystemExit("FREEFIELD_TOKEN is not set; refusing to start an open gateway")
     app = web.Application(middlewares=[auth_mw], client_max_size=1024 ** 3)
+    app["idle_unload_sec"] = IDLE_UNLOAD_SEC if idle_unload_sec is None else idle_unload_sec
+    app["idle_shutdown_sec"] = IDLE_SHUTDOWN_SEC if idle_shutdown_sec is None else idle_shutdown_sec
+    app["on_idle_shutdown"] = on_idle_shutdown or _default_shutdown
     app.router.add_get("/health", health)
     app.router.add_post("/freefield/prepare", prepare)
     app.router.add_get("/freefield/status", status)

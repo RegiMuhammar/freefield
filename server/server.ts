@@ -233,7 +233,7 @@ function wake() {
   const r = getRunner();   // throws without COMFY_BASE_URL: the caller answers 400
   waking = { since: Date.now() };
   const started = waking;
-  fetch(`${r.baseUrl}/health`, { signal: AbortSignal.timeout(15 * 60 * 1000) })
+  fetch(`${r.baseUrl}/health?wake=1`, { signal: AbortSignal.timeout(15 * 60 * 1000) })
     .then((res) => {
       if (!res.ok) throw new Error(`/health answered ${res.status}`);
       contact();
