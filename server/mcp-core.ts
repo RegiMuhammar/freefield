@@ -229,6 +229,7 @@ export type RunnerLike = {
   readonly token?: string;
   readonly allowDrafts: boolean;
   submit(app: App, rawValues: Values, presetId?: string): Promise<JobLike>;
+  getJob?(id: string): Promise<JobLike>;
 };
 
 export type McpServerOptions = {
@@ -276,7 +277,16 @@ export class McpServer {
     this.doFetch = opts.fetch ?? fetch;
     this.publicBaseUrl = (opts.publicBaseUrl ?? process.env.FREEFIELD_PUBLIC_URL ?? "").replace(/\/$/, "");
     let defaultRunner: Runner | null = null;
-    this.getRunnerFn = opts.getRunner ?? (() => (defaultRunner ??= new Runner({ allowDrafts: this.allowDrafts, fetch: this.doFetch })));
+    this.getRunnerFn = opts.getRunner ?? (() => {
+      const r = (defaultRunner ??= new Runner({ allowDrafts: this.allowDrafts, fetch: this.doFetch }));
+      return {
+        baseUrl: r.baseUrl,
+        token: r.token,
+        allowDrafts: r.allowDrafts,
+        submit: (app, rawValues, presetId) => r.submit(app, rawValues, presetId),
+        getJob: (id) => r.jobs().get(id),
+      };
+    });
     const outDir = opts.outDir || process.env.FREEFIELD_OUT || join(this.root, "out");
     this.history = opts.history ?? new History(join(outDir, "history"), {
       appInfo: (id) => {
@@ -554,7 +564,7 @@ export class McpServer {
     })();
 
     const shouldWait = opts.wait !== false;
-    const timeoutMs = Math.max(1, (opts.timeoutSeconds ?? 180) * 1000);
+    const timeoutMs = Math.max(1, (opts.timeoutSeconds ?? 300) * 1000);
     if (shouldWait) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -589,11 +599,40 @@ export class McpServer {
     return formatted;
   }
 
-  /** Wait up to `waitSeconds` for an active run to reach a terminal status. */
+  /** Wait up to `waitSeconds` for an active run to reach a terminal status (rehydrating from the backend if needed). */
   async waitForRun(runId: string, waitSeconds = 0): Promise<void> {
+    const terminal = new Set(["succeeded", "failed", "canceled", "expired", "lost"]);
+    const initial = this.history.get(runId);
+    if (!initial || terminal.has(initial.status)) return;
+    // If this process didn't start the run (or restarted), rehydrate the job from the backend
+    if (initial.job && initial.progress === null) {
+      const getJob = this.getRunnerFn().getJob;
+      if (getJob) {
+        try {
+          const job = await getJob(initial.job);
+          const followPromise = this.history.follow(initial as Entry, job);
+          if (waitSeconds > 0) {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            try {
+              await Promise.race([
+                followPromise,
+                new Promise<void>((r) => {
+                  timer = setTimeout(r, waitSeconds * 1000);
+                  timer.unref?.();
+                }),
+              ]);
+            } finally {
+              if (timer) clearTimeout(timer);
+            }
+          }
+          return;
+        } catch {
+          /* fall through to polling */
+        }
+      }
+    }
     if (waitSeconds <= 0) return;
     const deadline = Date.now() + waitSeconds * 1000;
-    const terminal = new Set(["succeeded", "failed", "canceled", "expired", "lost"]);
     while (Date.now() < deadline) {
       const cur = this.history.get(runId);
       if (!cur || terminal.has(cur.status)) return;
@@ -1065,8 +1104,8 @@ export class McpServer {
         case "freefield_get_run": {
           const runId = String(args.run_id ?? "").replace(/^history:/, "").split("/")[0].trim();
           if (!runId) throw new InputError("run_id: required");
-          const waitSec = typeof args.wait_seconds === "number" ? Math.min(300, Math.max(0, args.wait_seconds)) : 0;
-          if (waitSec > 0) await this.waitForRun(runId, waitSec);
+          const waitSec = typeof args.wait_seconds === "number" ? Math.min(300, Math.max(0, args.wait_seconds)) : 10;
+          await this.waitForRun(runId, waitSec);
           const outputDir = typeof args.output_dir === "string" && args.output_dir ? args.output_dir : undefined;
           const res = this.formatRunResult(runId, outputDir);
           return this.formatToolOutput(res);

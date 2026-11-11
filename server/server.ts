@@ -258,6 +258,7 @@ const mcp = new McpServer({
         contact();
         return job;
       },
+      getJob: (id) => r.jobs().get(id),
     };
   },
   getGpuStatus: (withDevice) => gpuStatus(withDevice),
