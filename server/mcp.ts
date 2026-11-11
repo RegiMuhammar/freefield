@@ -2,9 +2,22 @@
 //   npm run mcp                       stdio transport (Antigravity, Gemini CLI, Claude Desktop/Code, Cursor)
 //   npm run mcp -- --http [port]      standalone Streamable HTTP MCP server on /mcp (default port: 3001)
 // Note: `npm run serve` (server/server.ts) also mounts the HTTP MCP endpoint at /mcp alongside the Web UI.
+import { existsSync } from "node:fs";
 import { createServer } from "node:http";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { McpServer } from "./mcp-core.ts";
+import { repoRoot } from "./registry.ts";
+
+// Automatically load <repoRoot>/.env so clients like Claude Desktop that do not set `cwd` still pick up COMFY_BASE_URL & FREEFIELD_TOKEN.
+const envFile = join(repoRoot(), ".env");
+if (existsSync(envFile) && typeof process.loadEnvFile === "function") {
+  try {
+    process.loadEnvFile(envFile);
+  } catch {
+    /* ignore malformed .env */
+  }
+}
 
 const args = process.argv.slice(2);
 const httpIdx = args.indexOf("--http");
