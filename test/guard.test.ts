@@ -25,6 +25,9 @@ test("the passcode becomes a cookie that holds a hash, not the passcode", () => 
   assert.equal(g.admits(`other=1; ${pair}`), true);
   assert.equal(g.admits("ff_key=deadbeef"), false);
   assert.equal(new Guard({ passcode: "another" }).admits(pair), false);
+  assert.equal(g.admitsToken("Bearer open-sesame"), true);
+  assert.equal(g.admitsToken("Bearer wrong"), false);
+  assert.equal(g.admitsToken(undefined, "open-sesame"), true);
 });
 
 test("runs are capped per UTC day and at the same time, and the count survives a restart", () => {

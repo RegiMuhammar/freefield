@@ -27,6 +27,7 @@ import { explainSubmitError, InputError, resolveValues, Runner, type Values } fr
 import { History } from "./history.ts";
 import { Flags } from "./flags.ts";
 import { DOOR_HTML, Guard } from "./guard.ts";
+import { McpServer } from "./mcp-core.ts";
 
 const root = repoRoot();
 const { apps, problems } = loadRegistry(root);
@@ -242,10 +243,73 @@ function wake() {
     .catch((e) => { if (waking === started) waking = { ...started, error: (e as Error).message }; });
 }
 
+const mcp = new McpServer({
+  root,
+  apps,
+  history,
+  getRunner: () => {
+    const r = getRunner();
+    return {
+      baseUrl: r.baseUrl,
+      token: r.token,
+      allowDrafts: r.allowDrafts,
+      submit: async (app, rawValues, presetId) => {
+        const job = await r.submit(app, rawValues, presetId);
+        contact();
+        return job;
+      },
+    };
+  },
+  getGpuStatus: (withDevice) => gpuStatus(withDevice),
+  wakeGpu: () => wake(),
+  canStartRun: () => guard.refuse(activeRuns()),
+  onRunAccepted: () => guard.record(),
+  allowDrafts: draftsAllowed,
+});
+
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", "http://local");
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    const isMcp = (parts[0] === "mcp" && parts.length === 1) || (parts[0] === "api" && parts[1] === "mcp" && parts.length === 2);
+    if (isMcp) {
+      res.setHeader("access-control-allow-origin", "*");
+      res.setHeader("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
+      res.setHeader("access-control-allow-headers", "content-type, authorization, mcp-session-id, accept");
+      if (req.method === "OPTIONS") {
+        res.writeHead(204);
+        return res.end();
+      }
+      if (guard.passcode && !guard.admits(req.headers.cookie) && !guard.admitsToken(req.headers.authorization, url.searchParams.get("key"))) {
+        return send(res, 401, { error: "this demo needs its passcode: pass Authorization: Bearer <passcode> or ?key=<passcode>" });
+      }
+      if (req.method === "GET") {
+        if ((req.headers.accept ?? "").includes("text/event-stream")) {
+          res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+          res.write(": freefield-mcp stream ready\n\n");
+          const keepAlive = setInterval(() => res.write(": ping\n\n"), 25_000);
+          req.on("close", () => clearInterval(keepAlive));
+          return;
+        }
+        return send(res, 200, { name: "freefield-mcp", version: "0.1.0", transport: "streamable-http", endpoint: "/mcp", apps: apps.length });
+      }
+      if (req.method === "DELETE") return send(res, 200, { ok: true });
+      if (req.method === "POST") {
+        let payload: unknown;
+        try {
+          payload = await (await toRequest(req)).json();
+        } catch {
+          return send(res, 400, { jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
+        }
+        const answer = await mcp.handlePayload(payload);
+        if (answer === null) {
+          res.writeHead(202);
+          return res.end();
+        }
+        return send(res, 200, answer);
+      }
+      return send(res, 405, { error: "method not allowed" });
+    }
     if (guard.passcode) {
       const key = url.searchParams.get("key");
       const cookie = key !== null ? guard.login(key) : null;

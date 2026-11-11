@@ -9,7 +9,7 @@ Open-source Higgsfield on ComfyUI: every app is one folder, every model is open 
 Image, video, VFX and audio apps in a studio laid out like Higgsfield's, each one a ComfyUI workflow on open weights,
 run on Modal or on your own ComfyUI. Every example in the app is a real GPU run made by the lab, with its time and peak VRAM.
 
-[Run it](#run-it) on Modal or [on your own GPU](#on-your-own-gpu-without-modal) · [every app](#apps) with its model and VRAM · [add an app](#add-an-app) from any ComfyUI workflow ·
+[Run it](#run-it) on Modal or [on your own GPU](#on-your-own-gpu-without-modal) · [MCP server](docs/mcp.md) for Claude, ChatGPT, Cursor & Gemini · [every app](#apps) with its model and VRAM · [add an app](#add-an-app) from any ComfyUI workflow ·
 [every GPU run](docs/lab-runs.md) of the lab
 
 <table>
@@ -238,7 +238,8 @@ modal deploy infra/modal_app.py                   # FREEFIELD_GPU=A10G to try th
 # 4. web app
 npm install
 # in .env (made by step 1): COMFY_BASE_URL = the URL printed by step 3
-npm run serve                                     # http://127.0.0.1:3000
+npm run serve                                     # http://127.0.0.1:3000 (and HTTP MCP at /mcp)
+npm run mcp                                       # or stdio MCP server for Claude, Cursor, Gemini & Antigravity (docs/mcp.md)
 npm run app -- create-image --set prompt="a red bicycle against a white wall"   # or from the terminal
 ```
 

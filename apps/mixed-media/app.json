@@ -222,6 +222,17 @@
               "value": "Pop art, Ben-Day dots, bold primary colors, thick black outlines"
             }
           ]
+        },
+        {
+          "value": "vox-collage",
+          "label": "Vox collage",
+          "sets": [
+            {
+              "node": "ff_style",
+              "field": "value",
+              "value": "Editorial documentary paper-cutout collage in the style of Vox explainer videos: vintage halftone newspaper clippings, tactile torn paper edges, bold yellow highlighter strokes, grid paper background, flat graphic textures"
+            }
+          ]
         }
       ]
     },

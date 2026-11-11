@@ -54,6 +54,14 @@ export class Guard {
     return Boolean(got) && same(got, this.cookieValue);
   }
 
+  /** Does this request carry the passcode as a Bearer token or ?key= query param (for MCP / API clients)? */
+  admitsToken(authHeader: string | undefined, keyParam?: string | null): boolean {
+    if (!this.passcode) return true;
+    if (keyParam && same(keyParam, this.passcode)) return true;
+    const m = /^Bearer\s+(.+)$/i.exec(authHeader ?? "");
+    return m !== null && same(m[1].trim(), this.passcode);
+  }
+
   /** A correct ?key= becomes the cookie; the caller redirects to the same URL without it. */
   login(key: string | null): string | null {
     if (!this.passcode || !key || !same(key, this.passcode)) return null;
