@@ -16,18 +16,16 @@ Add `freefield` to your client's MCP configuration (`mcp_config.json`, `claude_d
     "freefield": {
       "command": "node",
       "args": [
-        "--env-file-if-exists=.env",
         "--experimental-strip-types",
         "--disable-warning=ExperimentalWarning",
-        "server/mcp.ts"
-      ],
-      "cwd": "/absolute/path/to/freefield"
+        "/absolute/path/to/freefield/server/mcp.ts"
+      ]
     }
   }
 }
 ```
 
-*(On Windows, use forward slashes in `cwd`, e.g. `"D:/Project Coding/freefield"`).*
+*(On Windows, use `"D:\\Project Coding\\freefield\\server\\mcp.ts"` or `"D:/Project Coding/freefield/server/mcp.ts"`. `server/mcp.ts` automatically loads `.env` from the repository root).*
 
 ### B. Claude Code (CLI)
 
